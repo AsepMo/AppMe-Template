@@ -53,7 +53,9 @@ import static com.appme.story.engine.app.fragments.NavigationDrawerFragment.POS_
 import static com.appme.story.engine.app.fragments.NavigationDrawerFragment.POS_APP_CLIENT;
 import static com.appme.story.engine.app.fragments.NavigationDrawerFragment.POS_APP_SERVER;
 import static com.appme.story.engine.app.fragments.NavigationDrawerFragment.POS_APP_MORE;
-
+import static com.appme.story.engine.app.fragments.FolderStructureFragment.Callback;
+import static com.appme.story.engine.app.fragments.FolderStructureFragment.FileActionListener;
+import static com.appme.story.engine.app.fragments.FolderStructureFragment.newInstance;
 
 import com.appme.story.R;
 import com.appme.story.engine.Api;
@@ -62,6 +64,12 @@ import com.appme.story.engine.app.fragments.NavigationDrawerFragment;
 import com.appme.story.engine.app.fragments.ApplicationFragment;
 import com.appme.story.engine.app.fragments.AppAboutFragment;
 import com.appme.story.engine.app.fragments.AppChromeFragment;
+import com.appme.story.engine.app.fragments.FolderStructureFragment;
+import com.appme.story.engine.app.folders.preview.IconPreview;
+import com.appme.story.engine.app.folders.fileTree.project.ProjectFileContract;
+import com.appme.story.engine.app.folders.fileTree.project.ProjectFilePresenter;
+import com.appme.story.engine.app.folders.fileTree.utils.FUtils;
+import com.appme.story.engine.app.folders.fileTree.settings.AppSetting;
 import com.appme.story.engine.app.utils.AppUtil;
 import com.appme.story.engine.app.utils.ScreenUtils;
 import com.appme.story.engine.app.listeners.OnRequestHandlerListener;
@@ -74,7 +82,7 @@ import com.appme.story.settings.FolderSettings;
 import com.appme.story.settings.theme.ThemePreference;
 import com.appme.story.settings.theme.Theme;
 
-public class ApplicationActivity extends ActionBarActivity implements AppMeReceiver.OnSendBroadcastListener {
+public class ApplicationActivity extends ActionBarActivity implements AppMeReceiver.OnSendBroadcastListener, FileActionListener {
 
     public static final String TAG = ApplicationActivity.class.getSimpleName();
     private SharedPreferences sp;
@@ -115,8 +123,11 @@ public class ApplicationActivity extends ActionBarActivity implements AppMeRecei
 
     private Toolbar mToolbar;
     private static final String KEY_PROJECT_FILE = "KEY_PROJECT_FILE";
-    private File mProjectFile;
+    private String mProjectFile;
+    private ProjectFileContract.Presenter mFilePresenter;
     private FolderSettings mPreferences;
+    private AppSetting mFileTreePreference;
+    
     public final static String ACTION_CHROME_TABS = "com.appme.story.application.ACTION_CHROME_TABS";
     public final static String EXTRA_URL = "EXTRA_URL";
 
@@ -162,7 +173,8 @@ public class ApplicationActivity extends ActionBarActivity implements AppMeRecei
         setContentView(R.layout.activity_application);
         sp = PreferenceManager.getDefaultSharedPreferences(ApplicationActivity.this);
         mPreferences = FolderSettings.getSettings(this);
-
+        mFileTreePreference = new AppSetting(this);
+        
         mToolbar = (Toolbar)findViewById(R.id.toolbar);
         if (mToolbar == null) {
             getSupportActionBar().setTitle(null);         
@@ -299,19 +311,23 @@ public class ApplicationActivity extends ActionBarActivity implements AppMeRecei
         mAppMeReceiver = new AppMeReceiver();
         mAppMeReceiver.setOnSendBroadcastListener(this);
         registerBroadcastReceiver();
-
+        if (savedInstanceState != null && savedInstanceState.containsKey(KEY_PROJECT_FILE)) {
+            mProjectFile = savedInstanceState.getString(KEY_PROJECT_FILE);
+        } else {
+            mProjectFile = getFolderMe().getAppMeFolder();
+        }
 
         //Change PrimaryColor
         changeActionBarColor();
 
         // start IconPreview class to get thumbnails if BrowserListAdapter
         // request them
-        //new IconPreview(this);
+        new IconPreview(this);
     }
     
     @Override
     public void onTrimMemory(int level) {
-        //IconPreview.clearCache();
+        IconPreview.clearCache();
     }
 
     @Override
@@ -484,14 +500,22 @@ public class ApplicationActivity extends ActionBarActivity implements AppMeRecei
         sb.append("\n");
         sb.append("Please wait...");
         showProgress(sb.toString());
+        mProjectFile = getFolderMe().getAppMeFolder();
+        final File folder = new File(mProjectFile);    
         setRequestHandler(new OnRequestHandlerListener(){
                 @Override
                 public void onHandler() {
-                    hideProgress();
-                    mProjectFile = new File(getFolderMe().getAppMeFolder());    
-                    //mFilePresenter.show(mProjectFile, true);
+                    hideProgress();                
+                    mFilePresenter.show(folder, true);
                 }
             });
+        FolderStructureFragment folderStructureFragment = null;   
+        if (folderStructureFragment == null) {
+            folderStructureFragment = newInstance("Folder", folder);
+        }
+        FragmentTransaction ft = getSupportFragmentManager().beginTransaction();
+        ft.replace(R.id.content_frame, folderStructureFragment, FolderStructureFragment.TAG).commit();
+        mFilePresenter = new ProjectFilePresenter(folderStructureFragment);     
     }
     
     public void getAppPreference(){
@@ -543,7 +567,113 @@ public class ApplicationActivity extends ActionBarActivity implements AppMeRecei
             });
     }
     
+    @Override
+    public void clickNewModule() {
+    }
 
+    @Override
+    public boolean clickCreateNewFile(File file, FolderStructureFragment.Callback callBack) {
+        return false;
+    }
+
+    @Override
+    public boolean clickRemoveFile(File file, FolderStructureFragment.Callback callBack) {
+        return false;
+    }
+
+    @Override
+    public void onFileClick(File file, FolderStructureFragment.Callback callBack) {    
+        boolean success = openFileByAnotherApp(file);
+        if (!success) {
+            showFileInfo(file);
+        }      
+    }
+
+    @Override
+    public void onFileLongClick(File file, FolderStructureFragment.Callback callBack) {
+        if (FUtils.canRead(file)) {
+            showFileInfo(file);
+        } else {
+            if (!openFileByAnotherApp(file)) {
+                showFileInfo(file);
+            }
+        }
+    }
+
+    private boolean openFileByAnotherApp(File file) {
+        //don't open compiled file
+        if (FUtils.hasExtension(file, "class", "dex", "jar")) {
+            Toast.makeText(this, "Unable to open file", Toast.LENGTH_SHORT).show();
+            return false;
+        }
+        try {
+            Uri uri;
+            if (Build.VERSION.SDK_INT >= 24) {
+                uri = FileProvider.getUriForFile(this, getPackageName() + ".provider", file);
+            } else {
+                uri = Uri.fromFile(file);
+            }
+            //create intent open file
+            MimeTypeMap myMime = MimeTypeMap.getSingleton();
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            String ext = FUtils.fileExt(file.getPath());
+            String mimeType = myMime.getMimeTypeFromExtension(ext != null ? ext : "");
+            intent.setDataAndType(uri, mimeType);
+            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+        return true;
+    }
+
+
+    /**
+     * show dialog with file info
+     * filePath, path, size, extension ...
+     *
+     * @param file - file to show info
+     */
+    private void showFileInfo(File file) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle(file.getName());
+        builder.setView(R.layout.dialog_view_file);
+        AlertDialog dialog = builder.create();
+        dialog.show();
+        TextView txtInfo = dialog.findViewById(R.id.txt_info);
+        txtInfo.setText(file.getPath() + "\n" + file.length() + " byte");
+        TextView text = dialog.findViewById(R.id.editor_view);
+        text.setText(FUtils.readFileToString(file));
+    }
+
+    public void getApkBackup() {
+        /*new FileSelector(ApplicationActivity.this, new String[]{FileSelector.APK})
+            .selectFile(new FileSelector.OnSelectListener() {
+                @Override
+                public void onSelect(String path) {
+                    File file = new File(path);
+                    if (file.isDirectory())
+                        throw new IllegalArgumentException("File cannot be a directory!");
+
+                    Intent intent = AppUtil.createFileOpenIntent(file);
+
+                    try {
+                        startActivity(intent);
+                    } catch (ActivityNotFoundException e) {
+                        startActivity(Intent.createChooser(intent, getString(R.string.action_open_file_with, file.getName())));
+                    } catch (Exception e) {
+                        new AlertDialog.Builder(ApplicationActivity.this)
+                            .setMessage(e.getMessage())
+                            .setTitle("Error")
+                            .setPositiveButton(android.R.string.ok, null)
+                            .show();
+                    }
+                }
+            });*/
+    }
+    
+    
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
